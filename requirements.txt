@@ -1,0 +1,8 @@
+jieba
+tqdm
+tensorboardX
+torch
+pytorch-nlp
+gensim
+pandas
+sklearn
