@@ -2,6 +2,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torchnlp.encoders.text import WhitespaceEncoder
 from gensim.models.keyedvectors import KeyedVectors
 
+import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 import torch
@@ -11,35 +12,48 @@ import os
 
 class ToTensor(object):
   def __call__(self, sample, tokenizer, max_len):  
+    self.max_len = max_len
+    
     X1, X2, Y = sample['sentence_one'], sample['sentence_two'], sample['target']
 
     X1 = str(X1)
     X2 = str(X2)
 
-    X1, X2 = self._tokenize_and_padding(X1, X2, tokenizer, max_len)
+    X1, X2 = self._tokenize(X1, X2, tokenizer)
     Y = torch.tensor(Y, dtype=torch.float)
     
     if torch.isnan(Y) > 0:
        raise RuntimeError(f'{sample} contain NaN')
 
-    return {'sentence_one': X1, 'sentence_two': X2, 'target': Y}
+    X1_pad = F.pad(X1, (0, max_len - len(X1)), value=0)
+    X2_pad = F.pad(X2, (0, max_len - len(X2)), value=0)
+  
+    # mask padding for transformer
+    X1_mask = (X1_pad == 0)
+    X2_mask = (X2_pad == 0)
 
-  def _pad_sequence(self, sequence, max_len):
-    sequence_difference = max_len - len(sequence)
-    if sequence_difference > 0:
-      pad_sequence = torch.zeros(sequence_difference)
-      return torch.cat((sequence, pad_sequence), 0)
+    return {
+      'sentence_one': X1_pad,
+      'sentence_two': X2_pad,
+      'sentence_one_mask': X1_mask,
+      'sentence_two_mask': X2_mask,
+      'target': Y,
+    }
+
+  def handle_max_len(self, sentence):
+    if len(sentence) <= self.max_len:
+      return sentence
     else:
-      return sequence[:max_len]
+      return sentence[:self.max_len]
 
-  def _tokenize_and_padding(self, X1, X2, tokenizer, max_len):
-    tokenized_X1 = tokenizer.encode(X1)
-    tokenized_X2 = tokenizer.encode(X2)
+  def _tokenize(self, X1, X2, tokenizer):
+    tokenized_X1 = tokenizer.encode(X1).type(torch.LongTensor)
+    tokenized_X2 = tokenizer.encode(X2).type(torch.LongTensor)
 
-    padded_token_X1 = self._pad_sequence(tokenized_X1, max_len=max_len).type(torch.LongTensor)
-    padded_token_X2 = self._pad_sequence(tokenized_X2, max_len=max_len).type(torch.LongTensor)
+    tokenized_X1 = self.handle_max_len(tokenized_X1)
+    tokenized_X2 = self.handle_max_len(tokenized_X2)
 
-    return padded_token_X1, padded_token_X2
+    return tokenized_X1, tokenized_X2
 
 class SentenceMatchingDataset(Dataset):
   def __init__(self, data_path, max_len, transform=None):
@@ -113,11 +127,34 @@ class SentenceMatchingDataset(Dataset):
 
     return sample
 
+# def pad_collate(batch):
+#   sentence_one, sentence_two, target = [], [], []
+
+#   for sample in batch:
+#     sentence_one.append(sample['sentence_one'])
+#     sentence_two.append(sample['sentence_two'])
+#     target.append(sample['target'])
+
+#   sentence_one_pad = torch.stack([F.pad(sentence, (0, 48 - len(sentence)), value=0) for sentence in sentence_one])
+#   sentence_two_pad = torch.stack([F.pad(sentence, (0, 48 - len(sentence)), value=0) for sentence in sentence_two])
+  
+#   # mask padding for transformer
+#   sentence_one_mask = (sentence_one_pad == 0)
+#   sentence_two_mask = (sentence_two_pad == 0)
+
+#   return {
+#     'sentence_one': sentence_one_pad,
+#     'sentence_two': sentence_two_pad,
+#     'sentence_one_mask': sentence_one_mask,
+#     'sentence_two_mask': sentence_one_mask,
+#     'target': torch.FloatTensor(target),
+#   }
+
 if __name__ == '__main__':
   dataset = SentenceMatchingDataset('./preprocessed/data', 48, transform=ToTensor())
   
-  # split dataset into [0.7, 0.15, 0.15] for train, valid and test set
-  train_length, valid_length = int(len(dataset) * 0.7), int(len(dataset) * 0.15)
+  # split dataset into [0.8, 0.1, 0.1] for train, valid and test set
+  train_length, valid_length = int(len(dataset) * 0.8), int(len(dataset) * 0.1)
   lengths = [train_length, valid_length, len(dataset) - train_length - valid_length]
 
   train_dataset, valid_dataset, test_dataset = random_split(dataset, lengths)

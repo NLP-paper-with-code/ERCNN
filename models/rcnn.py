@@ -1,6 +1,6 @@
-import torch
-import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn as nn
+import torch
 
 def mean_max(x):
   return torch.mean(x, dim=1), torch.max(x, dim=1)[0]
@@ -54,30 +54,26 @@ class Inception3(nn.Module):
 
     return torch.cat((avg_pool, max_pool), dim=1)
 
-# TODO(jamfly): not quite sure the detail of this implementation
-class FusionSubtract(nn.Module):
-  def __init__(self, input_dim, output_dim):
-    super(FusionSubtract, self).__init__()
-    self.dense = nn.Linear(input_dim, output_dim)
+class FusionLayer(nn.Module):
+  """
+  vector based fusion
+  m(x, y) = W([x, y, x * y, x - y]) + b
+  g(x, y) = w([x, y, x * y, x - y]) + b
+  :returns g(x, y) * m(x, y) + (1 - g(x, y)) * x
+  """
 
-  def forward(self, input_1, input_2):
-    result_sub = torch.sub(input_1, input_2)
-    result_mul = torch.mul(result_sub, result_sub)
+  def __init__(self, input_dim):
+    super(FusionLayer, self).__init__()
+    self.linear_f = nn.Linear(input_dim * 4, input_dim, bias=True)
+    self.linear_g = nn.Linear(input_dim * 4, input_dim, bias=True)
+    self.tanh = nn.Tanh()
+    self.sigmoid = nn.Sigmoid()
 
-    out = self.dense(result_mul)
-
-    return F.relu(out)
-
-class FusionMultiply(nn.Module):
-  def __init__(self, input_dim, output_dim):
-    super(FusionMultiply, self).__init__()
-    self.dense = nn.Linear(input_dim, output_dim)
-
-  def forward(self, input_1, input_2):
-    result = torch.mul(input_1, input_2)
-    out = self.dense(result)
-
-    return F.relu(out)
+  def forward(self, x, y):
+    z = torch.cat([x, y, x * y, x - y], dim=1)
+    gated = self.sigmoid(self.linear_g(z))
+    fusion = self.tanh(self.linear_f(z))
+    return gated * fusion + (1 - gated) * x
 
 class EnhancedRCNN(nn.Module):
   def __init__(
@@ -94,8 +90,6 @@ class EnhancedRCNN(nn.Module):
     freeze_embed=False,
   ):
     super(EnhancedRCNN, self).__init__()
-
-    full_connect_out_dim = int(linear_size // 2)
 
     self.max_len = max_len
     self.embedding = nn.Embedding.from_pretrained(
@@ -122,10 +116,11 @@ class EnhancedRCNN(nn.Module):
     # after cnn with kernal size 1, 2, and 3, the output dimension will be (max_len, max_len - 1, max_len - 2)
     # sum them up, will be 3 (max_len - 1) since we concate max and avag pool, so it will be 3(max_len - 1) * 2
     # see more detail on the implementation of Inception
-    self.full_connect_sub = FusionSubtract(3 * (max_len - 1) * 2 + self.embedding.embedding_dim * 2, full_connect_out_dim)
-    self.full_connect_mul = FusionMultiply(3 * (max_len - 1) * 2 + self.embedding.embedding_dim * 2, full_connect_out_dim)
-    self.dense = nn.Sequential(
-      nn.Linear(full_connect_out_dim * 2, number_of_class),
+    # interaction model will be [x, y, x - y, x * y], so it ended up being embedding_dim * 4
+    input_dim = 3 * (max_len - 1) * 2 + self.embedding.embedding_dim * 4 * 2
+    self.fusion_layer = FusionLayer(input_dim)
+    self.out = nn.Sequential(
+      nn.Linear(input_dim * 2, number_of_class),
       nn.Sigmoid()
     )
   
@@ -140,28 +135,21 @@ class EnhancedRCNN(nn.Module):
 
     return input_1_align, input_2_align
 
-  def forward(self, sentence_1, sentence_2):
+  def forward(self, sentence_1, sentence_2, sentence_1_mask, sentence_2_mask):
     sentence_1_embedding = self.batchnorm(self.embedding(sentence_1))
     sentence_2_embedding = self.batchnorm(self.embedding(sentence_2))
 
-    x_1 = self.dropout(sentence_1_embedding)
-    x_2 = self.dropout(sentence_1_embedding)
+    X_1 = self.dropout(sentence_1_embedding).transpose(1, 0)
+    X_2 = self.dropout(sentence_1_embedding).transpose(1, 0)
     
-    # [batch_size, max_len, embedding_dim]
-    sentence_1_representation = self.sentence1_transformer(x_1)
-    sentence_2_representation = self.sentence1_transformer(x_2)
+    # [max_len, batch_size, embedding_dim]
+    sentence_1_representation = self.sentence1_transformer(X_1, src_key_padding_mask=sentence_1_mask)
+    sentence_2_representation = self.sentence1_transformer(X_2, src_key_padding_mask=sentence_2_mask)
 
-    # [batch_size, embedding_dim, max_len]
-    sentence_1_encoded_permute = sentence_1_representation.permute(0, 2, 1)
-    sentence_2_encoded_permute = sentence_2_representation.permute(0, 2, 1)
-
-    # [batch_size, max_len, embedding_dim]
-    sentence_1_alignment, sentence_2_alignment = self.soft_align(sentence_1_representation, sentence_2_representation)
-
-    # [batch_size, embedding_dim]
-    sentence_1_attention_mean, sentence_1_attention_max = mean_max(sentence_1_alignment)
-    sentence_2_attention_mean, sentence_2_attention_max = mean_max(sentence_2_alignment)
-
+    # [max_len, batch_size, embedding_dim] -> [batch_size, embedding_dim, max_len]
+    sentence_1_encoded_permute = sentence_1_representation.permute(1, 2, 0)
+    sentence_2_encoded_permute = sentence_2_representation.permute(1, 2, 0)
+    
     sentence_1_cnn = torch.cat(
       (
         self.cnn1(sentence_1_encoded_permute),
@@ -180,17 +168,42 @@ class EnhancedRCNN(nn.Module):
       dim=1,
     )
 
+    # [max_len, batch_size, embedding_dim] -> [batch_size, max_len, embedding_dim]
+    sentence_1_representation = sentence_1_representation.transpose(1, 0)
+    sentence_2_representation = sentence_2_representation.transpose(1, 0)
+
+    sentence_1_alignment, sentence_2_alignment = self.soft_align(sentence_1_representation, sentence_2_representation)
+
+    # [batch_size, max_len, 4 * embedding_dim]
+    sentence_1_interaction = torch.cat((
+      sentence_1_representation,
+      sentence_1_alignment,
+      sentence_1_representation - sentence_1_alignment,
+      sentence_1_representation * sentence_1_alignment
+    ), dim=2)
+
+    sentence_2_interaction = torch.cat((
+      sentence_2_representation,
+      sentence_2_alignment,
+      sentence_2_representation - sentence_2_alignment,
+      sentence_2_representation * sentence_2_alignment
+    ), dim=2)
+
+    # [batch_size, embedding_dim * 4]
+    sentence_1_interaction_mean, sentence_1_interaction_max = mean_max(sentence_1_interaction)
+    sentence_2_interaction_mean, sentence_2_interaction_max = mean_max(sentence_2_interaction)
+
     sentence_1 = torch.cat(
-      (sentence_1_attention_mean, sentence_1_cnn, sentence_1_attention_max), dim=1,
+      (sentence_1_interaction_mean, sentence_1_cnn, sentence_1_interaction_max), dim=1,
     )
     
     sentence_2 = torch.cat(
-      (sentence_2_attention_mean, sentence_2_cnn, sentence_2_attention_max), dim=1,
+      (sentence_2_interaction_mean, sentence_2_cnn, sentence_2_interaction_max), dim=1,
     )
 
-    result_sub = self.full_connect_sub(sentence_1, sentence_2)
-    result_mul = self.full_connect_mul(sentence_1, sentence_2)
+    fused_sentence_1 = self.fusion_layer(sentence_1, sentence_2)
+    fused_sentence_2 = self.fusion_layer(sentence_2, sentence_1)
     
-    result = torch.cat((result_sub, result_mul), dim=1)
+    result = torch.cat((fused_sentence_1, fused_sentence_2), dim=1)
     
-    return self.dense(result)
+    return self.out(result)

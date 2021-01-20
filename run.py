@@ -9,7 +9,6 @@ import torch
 from dataloader import SentenceMatchingDataset, ToTensor
 
 from models.rcnn import EnhancedRCNN
-from models.rcnn_transformer import EnhancedRCNN_Transformer
 from trainer import Trainer
 
 import argparse
@@ -23,7 +22,7 @@ def get_parser():
   parser.add_argument('--fix-embed', action='store_true', default=False, help='if freeze the embedding parameters')
   parser.add_argument('--batch-size', type=int, default=256, metavar='N', help='input batch size for training (default: 256)')
   parser.add_argument('--epoch', type=int, default=10, metavar='N', help='number of epochs to train')
-  parser.add_argument('--lr', type=float, default=0.001, metavar='N', help='learning rate (default: 0.001)')
+  parser.add_argument('--lr', type=float, default=0.00001, metavar='N', help='learning rate (default: 0.00001)')
   parser.add_argument('--beta1', type=float, default=0.9, metavar='N', help='beta 1 for Adam optimizer (default: 0.9)')
   parser.add_argument('--beta2', type=float, default=0.999, metavar='N', help='beta 2 for Adam optimizer (default: 0.999)')
   parser.add_argument('--epsilon', type=float, default=1e-08, metavar='N', help='epsilon for Adam optimizer (default: 1e-08)')
@@ -58,8 +57,8 @@ if __name__ == '__main__':
 
   embeddings_matrix = dataset.get_embedding()
 
-  # split dataset into [0.7, 0.15, 0.15] for train, valid and test set
-  train_length, valid_length = int(len(dataset) * 0.7), int(len(dataset) * 0.15)
+  # split dataset into [0.8, 0.1, 0.1] for train, valid and test set
+  train_length, valid_length = int(len(dataset) * 0.8), int(len(dataset) * 0.1)
   lengths = [train_length, valid_length, len(dataset) - train_length - valid_length]
 
   train_dataset, valid_dataset, test_dataset = random_split(dataset, lengths)
