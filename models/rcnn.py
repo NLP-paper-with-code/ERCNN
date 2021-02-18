@@ -140,8 +140,8 @@ class EnhancedRCNN(nn.Module):
     sentence_2_embedding = self.batchnorm(self.embedding(sentence_2))
 
     X_1 = self.dropout(sentence_1_embedding).transpose(1, 0)
-    X_2 = self.dropout(sentence_1_embedding).transpose(1, 0)
-    
+    X_2 = self.dropout(sentence_2_embedding).transpose(1, 0)
+
     # [max_len, batch_size, embedding_dim]
     sentence_1_representation = self.sentence1_transformer(X_1, src_key_padding_mask=sentence_1_mask)
     sentence_2_representation = self.sentence1_transformer(X_2, src_key_padding_mask=sentence_2_mask)
